@@ -53,8 +53,14 @@ class CryptoBroker(BaseBroker):
           CRYPTO_ALPACA_SECRET_KEY
           CRYPTO_ALPACA_PAPER       (true/false)
         Set edilmediyse default ALPACA_* key'lerine fallback.
+
+        V6.0-α: Graceful boot — eğer hiçbir key yoksa TradingClient
+        instantiate edilmez ve `self.client = None`. Tüm read/write
+        metotları self.client is None kontrolüyle "credentials_missing"
+        döner. Bu sayede Railway'de env var set edilmeden de
+        konteyner başlar, /health 200 verir, kullanıcı dashboard
+        üzerinden eksiklik mesajını görür.
         """
-        from alpaca.trading.client import TradingClient
         self.dry_run = dry_run
 
         # Crypto-specific key'ler set edildi mi?
@@ -73,17 +79,40 @@ class CryptoBroker(BaseBroker):
         )
         self.is_dedicated_account = bool(os.getenv("CRYPTO_ALPACA_API_KEY"))
 
-        self.client = TradingClient(
-            api_key=api_key,
-            secret_key=secret_key,
-            paper=paper,
-        )
-        # Equity broker'daki gibi 10sn timeout
-        original_request = self.client._session.request
-        def request_with_timeout(method, url, **kwargs):
-            kwargs.setdefault("timeout", 10)
-            return original_request(method, url, **kwargs)
-        self.client._session.request = request_with_timeout
+        # Credential check — boot'u kilitleme
+        self.credentials_present = bool(api_key and secret_key)
+        if not self.credentials_present:
+            self.client = None
+            self.enabled = False
+            self.boot_warning = (
+                "Alpaca credentials missing — set CRYPTO_ALPACA_API_KEY + "
+                "CRYPTO_ALPACA_SECRET_KEY (or ALPACA_API_KEY/ALPACA_SECRET_KEY) "
+                "in Railway Variables to enable broker."
+            )
+            print(f"[CryptoBroker] WARNING: {self.boot_warning}")
+            return
+
+        self.boot_warning = None
+        self.enabled = True
+
+        try:
+            from alpaca.trading.client import TradingClient
+            self.client = TradingClient(
+                api_key=api_key,
+                secret_key=secret_key,
+                paper=paper,
+            )
+            # 10sn timeout — Alpaca SDK default sonsuz olabiliyor
+            original_request = self.client._session.request
+            def request_with_timeout(method, url, **kwargs):
+                kwargs.setdefault("timeout", 10)
+                return original_request(method, url, **kwargs)
+            self.client._session.request = request_with_timeout
+        except Exception as e:
+            self.client = None
+            self.enabled = False
+            self.boot_warning = f"Alpaca client init failed: {e}"
+            print(f"[CryptoBroker] ERROR: {self.boot_warning}")
 
     @property
     def asset_class(self) -> AssetClass:
@@ -93,7 +122,20 @@ class CryptoBroker(BaseBroker):
     # READ-ONLY metotlar — gerçek API'yı çağırır, side-effect yok
     # ───────────────────────────────────────────────────────────
 
+    def _no_client_response(self) -> dict:
+        """Credential yoksa standart hata response'u."""
+        return {
+            "error": "credentials_missing",
+            "message": self.boot_warning or "Alpaca client not initialized",
+            "asset_class": "crypto",
+            "account_label": self.account_label,
+            "credentials_present": self.credentials_present,
+            "hint": "Set CRYPTO_ALPACA_API_KEY + CRYPTO_ALPACA_SECRET_KEY in env vars.",
+        }
+
     def get_balance(self) -> float:
+        if self.client is None:
+            return 0.0
         try:
             acct = self.client.get_account()
             return float(acct.cash)
@@ -102,6 +144,8 @@ class CryptoBroker(BaseBroker):
             return 0.0
 
     def get_account_status(self) -> dict:
+        if self.client is None:
+            return self._no_client_response()
         try:
             acct = self.client.get_account()
             return {
@@ -130,6 +174,8 @@ class CryptoBroker(BaseBroker):
         Alpaca pozisyon endpoint'inde sembol genelde slash'sız ("BTCUSD") olabilir;
         her iki formatı da deniyoruz.
         """
+        if self.client is None:
+            return None
         try:
             # Önce slash'lı dene
             try:
@@ -152,6 +198,8 @@ class CryptoBroker(BaseBroker):
 
     def get_pending_orders(self) -> list:
         """Tüm bekleyen emirler — equity ve crypto karışık döner; filtrelenir."""
+        if self.client is None:
+            return []
         try:
             from alpaca.trading.requests import GetOrdersRequest
             from alpaca.trading.enums import QueryOrderStatus
@@ -201,6 +249,13 @@ class CryptoBroker(BaseBroker):
         """
         action = action.lower().strip()
         ticker = ticker.upper().strip()
+
+        # Credential guard
+        if self.client is None:
+            return {
+                "status": "error", "ticker": ticker,
+                "reason": "credentials_missing — Alpaca client not initialized",
+            }
 
         # Crypto: short genelde yok, perp ayrı API
         if action == "short":
@@ -400,7 +455,9 @@ class CryptoBroker(BaseBroker):
         }
 
     def cancel_all_orders(self) -> dict:
-        """Bekleyen tüm crypto emirlerini iptal et."""
+        """Bekleyen tüm CRYPTO emirlerini iptal et (equity emirlere dokunmaz)."""
+        if self.client is None:
+            return {"error": "credentials_missing"}
         if self.dry_run:
             pending = self.get_pending_orders()
             return {
@@ -408,14 +465,30 @@ class CryptoBroker(BaseBroker):
                 "would_cancel": len(pending),
                 "message": "DRY-RUN — gerçekte iptal edilmedi.",
             }
-        try:
-            cancels = self.client.cancel_orders()
-            return {"cancelled": len(cancels) if cancels else 0}
-        except Exception as e:
-            return {"error": str(e)}
+        # Sadece crypto order'ları cancel et — equity karışık account riski
+        crypto_orders = self.get_pending_orders()
+        cancelled_ids = []
+        errors = []
+        for o in crypto_orders:
+            order_id = o.get("id")
+            if not order_id:
+                continue
+            try:
+                self.client.cancel_order_by_id(order_id)
+                cancelled_ids.append(order_id)
+            except Exception as e:
+                errors.append({"id": order_id, "error": str(e)})
+        return {
+            "cancelled": len(cancelled_ids),
+            "cancelled_ids": cancelled_ids,
+            "errors": errors,
+            "scope": "crypto_only",
+        }
 
     def emergency_liquidate(self) -> dict:
         """Tüm crypto pozisyonlarını piyasada kapa."""
+        if self.client is None:
+            return {"error": "credentials_missing"}
         if self.dry_run:
             try:
                 positions = self.client.get_all_positions()
