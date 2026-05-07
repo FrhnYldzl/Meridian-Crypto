@@ -182,6 +182,112 @@ IMPORTANT:
 - KEEP JSON COMPACT"""
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool schemas — Claude tool-use mode for structured output.
+#
+# Bu sayede `_extract_json` regex fallback'ine ihtiyaç kalmaz; SDK
+# block.input olarak Python dict verir, malformed JSON imkânsız.
+# ─────────────────────────────────────────────────────────────────
+
+DECISIONS_TOOL = {
+    "name": "submit_decisions",
+    "description": (
+        "Submit your crypto trading regime analysis and per-coin decisions "
+        "as structured data. Use this exclusively — do not produce text output."
+    ),
+    "input_schema": {
+        "type": "object",
+        "required": ["regime", "active_strategy", "decisions", "market_summary"],
+        "properties": {
+            "regime": {
+                "type": "string",
+                "enum": ["bull_strong", "bull", "neutral", "bear", "bear_strong"],
+                "description": "Quant regime classification.",
+            },
+            "regime_reasoning": {"type": "string"},
+            "active_strategy": {
+                "type": "string",
+                "enum": ["momentum", "selective_swing", "defensive", "mean_reversion"],
+            },
+            "btc_dominance_note": {"type": "string"},
+            "asset_group_view": {"type": "string"},
+            "decisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["ticker", "action", "confidence", "reasoning"],
+                    "properties": {
+                        "ticker": {"type": "string", "description": "e.g. BTC/USD"},
+                        "action": {
+                            "type": "string",
+                            "enum": ["long", "close_long", "hold", "watch", "reduce"],
+                        },
+                        "confidence": {"type": "integer", "minimum": 1, "maximum": 10},
+                        "strategy": {"type": "string"},
+                        "asset_group": {
+                            "type": "string",
+                            "description": "L1 | L2 | DeFi | Meme | Payment | Infra | RWA | Utility",
+                        },
+                        "reasoning": {"type": "string"},
+                        "entry_zone": {"type": "string"},
+                        "stop_loss": {"type": "string"},
+                        "take_profit": {"type": "string"},
+                        "risk_reward": {"type": "string"},
+                        "position_size_pct": {"type": "number"},
+                        "urgency": {
+                            "type": "string",
+                            "enum": ["high", "medium", "low"],
+                        },
+                        "risk_note": {"type": "string"},
+                    },
+                },
+            },
+            "market_summary": {"type": "string"},
+            "portfolio_note": {"type": "string"},
+            "watchlist_alerts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "ticker": {"type": "string"},
+                        "alert": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+}
+
+REVIEW_TOOL = {
+    "name": "submit_review",
+    "description": "Submit your structured trade-review analysis as data.",
+    "input_schema": {
+        "type": "object",
+        "required": ["review", "lessons"],
+        "properties": {
+            "review": {"type": "string"},
+            "lessons": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "performance": {
+                "type": "object",
+                "properties": {
+                    "win_rate_pct": {"type": "number"},
+                    "avg_winner_pct": {"type": "number"},
+                    "avg_loser_pct": {"type": "number"},
+                    "biggest_mistake": {"type": "string"},
+                },
+            },
+            "suggestions": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+    },
+}
+
+
 CRYPTO_REVIEW_SYSTEM_PROMPT = """You are reviewing your own past CRYPTO trading decisions as a self-improving AI trader.
 
 Analyze the pattern of decisions and extract specific, actionable lessons.
@@ -374,9 +480,10 @@ class CryptoBrain(BaseBrain):
             learning_context=learning_context or "",
         )
 
-        # Claude API — system kanalı cacheable (5dk ephemeral TTL).
-        # Static framework her çağrıda aynı → cache hit oranı yüksek →
-        # token maliyeti yaklaşık 1/10'a düşer.
+        # Claude API — tool-use mode + cached system prompt.
+        # tool_choice forces the model to call submit_decisions, so the
+        # response.content carries a tool_use block whose `input` is the
+        # already-parsed structured dict. No regex-extract-JSON gymnastics.
         try:
             msg = self.client.messages.create(
                 model=self.model,
@@ -386,10 +493,17 @@ class CryptoBrain(BaseBrain):
                     "text": CRYPTO_SYSTEM_PROMPT,
                     "cache_control": {"type": "ephemeral"},
                 }],
+                tools=[DECISIONS_TOOL],
+                tool_choice={"type": "tool", "name": "submit_decisions"},
                 messages=[{"role": "user", "content": user_message}],
             )
-            response_text = msg.content[0].text
-            decisions = self._extract_json(response_text)
+
+            decisions = self._extract_tool_input(msg, "submit_decisions")
+            if decisions is None:
+                # Forced tool_choice ile buraya neredeyse hiç düşmeyiz —
+                # ama eski text path'i fallback olarak koruyoruz.
+                response_text = self._first_text(msg)
+                decisions = self._extract_json(response_text)
 
             usage = self._record_usage(msg, kind="run_brain")
             decisions["timestamp"] = datetime.now(timezone.utc).isoformat()
@@ -421,10 +535,15 @@ class CryptoBrain(BaseBrain):
                     "text": CRYPTO_REVIEW_SYSTEM_PROMPT,
                     "cache_control": {"type": "ephemeral"},
                 }],
+                tools=[REVIEW_TOOL],
+                tool_choice={"type": "tool", "name": "submit_review"},
                 messages=[{"role": "user", "content": user_message}],
             )
             self._record_usage(msg, kind="review")
-            return self._extract_json(msg.content[0].text)
+            data = self._extract_tool_input(msg, "submit_review")
+            if data is None:
+                return self._extract_json(self._first_text(msg))
+            return data
         except Exception as e:
             return {"review": f"Hata: {e}", "lessons": []}
 
@@ -471,7 +590,7 @@ Total Equity: ${equity:,.2f}
 ## RECENT TRADE HISTORY
 {trades_text}{learning_section}{sentiment_block}
 
-Now produce the decision JSON exactly per the response format in the system instructions."""
+Now submit your analysis by calling the `submit_decisions` tool. Do not write any text response."""
 
     # ───────────────────────────────────────────────────────────
     # Formatting helpers (crypto-specific)
@@ -558,6 +677,31 @@ Now produce the decision JSON exactly per the response format in the system inst
                 summary = info.get("summary", "")
                 lines.append(f"  {ticker}: sentiment {score} — {summary}")
         return "\n".join(lines) if lines else "  No sentiment data"
+
+    @staticmethod
+    def _extract_tool_input(msg, tool_name: str):
+        """
+        Claude response'u içindeki tool_use bloğundan dict input'u çek.
+        msg.content list of blocks (TextBlock / ToolUseBlock); tool_choice
+        zorunlu olduğu için ToolUseBlock garanti gelir, ama yine de None
+        dönmeye karşı dayanıklı.
+        """
+        for block in getattr(msg, "content", None) or []:
+            if getattr(block, "type", None) == "tool_use" and getattr(block, "name", "") == tool_name:
+                inp = getattr(block, "input", None)
+                if isinstance(inp, dict):
+                    return inp
+        return None
+
+    @staticmethod
+    def _first_text(msg) -> str:
+        """İlk text bloğunu döner (fallback path için)."""
+        for block in getattr(msg, "content", None) or []:
+            if getattr(block, "type", None) == "text":
+                return getattr(block, "text", "") or ""
+            if hasattr(block, "text"):
+                return block.text or ""
+        return ""
 
     @staticmethod
     def _extract_json(text: str) -> dict:
