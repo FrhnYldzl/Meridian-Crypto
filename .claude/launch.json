@@ -1,0 +1,27 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "crypto-api",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m", "uvicorn",
+        "crypto_preview_app:app",
+        "--host", "127.0.0.1",
+        "--port", "8002",
+        "--app-dir", "server"
+      ],
+      "port": 8002,
+      "env": {
+        "CRYPTO_DRY_RUN": "true",
+        "CRYPTO_AUTO_EXECUTE": "false",
+        "CRYPTO_ALPACA_API_KEY": "PKDUMMYDUMMYDUMMYDUMM",
+        "CRYPTO_ALPACA_SECRET_KEY": "dummyDUMMYdummyDUMMYdummyDUMMYdummyDUMMYdum",
+        "CRYPTO_ALPACA_PAPER": "true",
+        "CRYPTO_ACCOUNT_LABEL": "Local Preview",
+        "JOURNAL_DB_PATH": "server/data/crypto_journal.db",
+        "PYTHONPATH": "server"
+      }
+    }
+  ]
+}
