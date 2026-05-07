@@ -20,6 +20,7 @@ Caching: 10dk TTL — haber feed'leri yavaş, çok sık çekmek gereksiz.
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 from urllib.request import Request, urlopen
 from urllib.error import URLError
@@ -151,15 +152,28 @@ def get_crypto_news(force_refresh: bool = False) -> dict:
     if not force_refresh and _news_cache["data"] and (now - _news_cache["ts"]) < NEWS_CACHE_TTL:
         return _news_cache["data"]
 
+    # V6.0: Paralel fetch — sıralı 8sn × N feed yerine eşzamanlı.
+    # Sıralı modda 5 feed × 500ms = 2.5sn, paralel modda ~600ms.
     all_items: list[dict] = []
     sources_used: list[str] = []
-    for source, url in RSS_FEEDS:
-        items = _fetch_rss(url)
-        if items:
-            sources_used.append(source)
-            for item in items:
-                item["source"] = source
-                all_items.append(item)
+    fetch_start = time.time()
+    with ThreadPoolExecutor(max_workers=min(len(RSS_FEEDS), 8)) as pool:
+        future_map = {
+            pool.submit(_fetch_rss, url): source
+            for source, url in RSS_FEEDS
+        }
+        for future in as_completed(future_map):
+            source = future_map[future]
+            try:
+                items = future.result()
+            except Exception:
+                items = []
+            if items:
+                sources_used.append(source)
+                for item in items:
+                    item["source"] = source
+                    all_items.append(item)
+    fetch_ms = int((time.time() - fetch_start) * 1000)
 
     # Ticker bazında grupla
     by_ticker: dict[str, dict] = {}
@@ -203,6 +217,8 @@ def get_crypto_news(force_refresh: bool = False) -> dict:
             "sources": sources_used,
             "total_articles": len(all_items),
             "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "fetch_ms": fetch_ms,
+            "parallel": True,
         },
     }
     _news_cache = {"data": result, "ts": now}

@@ -21,10 +21,11 @@ Endpoint'ler:
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 import time
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -609,12 +610,33 @@ def scheduler_status():
     return _auto_executor.get_status()
 
 
+def _require_admin_token(x_admin_token: Optional[str]):
+    """
+    CRYPTO_ADMIN_TOKEN env var set ise gönderilen header onunla eşleşmeli.
+    Set DEĞİLSE token zorunlu değil (dev / lokal kolaylığı için).
+
+    Üretimde Railway'de mutlaka CRYPTO_ADMIN_TOKEN set et — public domain'de
+    /run-now'u herhangi biri tetikleyemesin.
+    """
+    expected = os.getenv("CRYPTO_ADMIN_TOKEN")
+    if not expected:
+        return  # Token unset → koruma kapalı (sadece dev için)
+    if not x_admin_token or x_admin_token != expected:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing X-Admin-Token header",
+        )
+
+
 @app.post("/api/crypto/run-now")
-def run_now():
+def run_now(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
     """
     Manuel pipeline trigger — auto_execute kapalıyken bile çalışır.
     Broker dry_run ON ise gerçek emir gitmez.
+
+    Güvenlik: CRYPTO_ADMIN_TOKEN set ise X-Admin-Token header zorunlu.
     """
+    _require_admin_token(x_admin_token)
     return _auto_executor.run_once(force=True)
 
 
