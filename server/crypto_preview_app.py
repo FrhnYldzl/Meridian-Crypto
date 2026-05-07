@@ -40,7 +40,8 @@ from crypto import (
 )
 import os
 
-app = FastAPI(title="Trading Agent — Crypto Preview", version="5.10")
+APP_VERSION = "6.0-α"
+app = FastAPI(title="Meridian Capital — Crypto V6.0", version=APP_VERSION)
 
 # Broker dry_run ayrı env var ile kontrol edilir (default true — paper learning)
 _broker_dry_run = (os.getenv("CRYPTO_DRY_RUN", "true").lower()
@@ -137,7 +138,7 @@ def health():
     return {
         "status": "ok",
         "module": "crypto",
-        "version": "5.10",  # V5.10 final — α/β/γ/δ/ε/ζ/η hepsi tamam
+        "version": APP_VERSION,
         "asset_class": "crypto",
         "dry_run": _broker.dry_run,
         "paper": _broker.paper,
@@ -158,6 +159,19 @@ def health():
 def audit_status():
     """Son Gemini audit sonuçları."""
     return _auditor.get_last_audit()
+
+
+@app.get("/api/crypto/brain-usage")
+def brain_usage():
+    """
+    Anthropic API kullanımı + prompt caching telemetrisi.
+
+    Önemli alanlar:
+      cache_hit_ratio    → 1.0'a yakın = cache çalışıyor
+      avg_cost_per_call  → tek brain çağrısının USD maliyeti
+      projected_monthly  → 5dk'da bir taramayla aylık kestirim
+    """
+    return _brain.get_usage_stats()
 
 
 @app.get("/api/crypto/news")

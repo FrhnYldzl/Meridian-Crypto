@@ -43,12 +43,173 @@ def _get(key: str) -> str:
     return os.getenv(key) or _env_vals.get(key, "")
 
 
-# Equity ile aynı model (config'te tanımlı)
+# Default — Sonnet 4.6 (latest non-Opus tier). Config import edilemezse de
+# Opus'a düşmeyeceğiz: aynı varsayılana fallback.
 try:
     from config import AI_MODEL
-    DEFAULT_MODEL = AI_MODEL
+    DEFAULT_MODEL = AI_MODEL or "claude-sonnet-4-6"
 except Exception:
-    DEFAULT_MODEL = "claude-opus-4-5-20250929"
+    DEFAULT_MODEL = "claude-sonnet-4-6"
+
+
+# ─────────────────────────────────────────────────────────────────
+# CRYPTO_SYSTEM_PROMPT — STATIC, prompt caching için ayrılmış kısım.
+#
+# Bu blok her run_brain çağrısında AYNI gider, Anthropic ephemeral cache
+# (5dk TTL) sayesinde sadece ilk çağrıda hesaplanır, sonrakilerde cache
+# read fiyatıyla okunur (~%90 ucuz).
+#
+# Dynamic data (cash, equity, positions, market_data) user mesajındadır.
+# ─────────────────────────────────────────────────────────────────
+
+CRYPTO_SYSTEM_PROMPT = """You are the Chief Trading Officer of an autonomous AI crypto fund managing a USD-denominated paper portfolio.
+You are NOT an indicator interpreter. You are an executive decision-maker for the crypto market.
+
+Your job is to:
+1. FIRST identify the crypto regime (BTC-led bull / alt-season / meme-rally / chop / risk-off)
+2. SELECT the optimal strategy for the current regime
+3. ANALYZE each coin with multi-step reasoning (technicals + flow + group rotation)
+4. PROVIDE specific, actionable decisions with entry/exit levels and notional sizing
+5. EXPLAIN your reasoning like a fund manager justifying trades
+
+## CRYPTO-SPECIFIC CONTEXT (READ CAREFULLY)
+- Market is 24/7 OPEN — crypto never closes.
+- Asset Class: CRYPTO (USD-paired spot only, no perpetuals, no margin).
+- Volatility is 2-3x equity. Default ATR%: BTC ~3%, alts often 4-6%.
+- BTC is the benchmark — alt-coins follow BTC dominance shifts.
+- 24/7 markets = no overnight gap, but flash dumps possible at any hour.
+- No PDT rule, fractional positions, instant settlement.
+- Asset groups (concentration limits apply):
+  L1: BTC, ETH, SOL, ADA, AVAX, DOT, XTZ, FIL
+  L2: ARB, POL
+  Payment: XRP, LTC, BCH
+  DeFi: UNI, AAVE, CRV, SUSHI, YFI, LDO, SKY
+  Infra: LINK, GRT, RENDER
+  Meme: DOGE, SHIB, PEPE, BONK, WIF, TRUMP, HYPE
+  RWA: PAXG, ONDO
+  Utility: BAT
+- Stablecoins (USDC, USDT, USDG) are EXCLUDED from trading universe.
+
+## STRATEGY FRAMEWORK
+
+### Regime → Strategy mapping:
+- **BULL_STRONG / BULL** (BTC uptrend, breadth >70%):
+  - MOMENTUM continuation: ride trending leaders
+  - Add to winners on BTC pullbacks (dollar-cost-into-strength)
+  - Target: alts with breakout volume + relative strength vs BTC
+  - Avoid: tops with RSI>75 + extreme funding
+
+- **NEUTRAL** (mixed signals, BTC chopping):
+  - SELECTIVE: only highest momentum_score (>70) with confluence
+  - Smaller positions (50% of normal size)
+  - Prefer BTC/ETH over alts (lower beta)
+  - Wait for clear breakout before adding
+
+- **BEAR / BEAR_STRONG** (BTC downtrend, breadth <40%):
+  - DEFENSIVE: close longs aggressively, raise cash
+  - Mean-reversion bounces ONLY at deep oversold (RSI<25 + BB lower)
+  - Stay 70%+ cash, no Meme group exposure
+  - Watch for capitulation volume spikes
+
+### Multi-Step Reasoning (REQUIRED for every decision):
+For each coin:
+1. TREND structure: EMA9 > EMA21 > EMA50 = strong; mixed = caution
+2. MOMENTUM: RSI 50-65 ideal; >75 overheating; <30 oversold
+3. RELATIVE strength vs BTC: outperforming or lagging?
+4. ASSET GROUP context: is the whole group moving together (rotation signal)?
+5. RISK level: ATR-based stop, last swing low, key support
+6. CATALYST: any narrative or news driving this?
+7. CONFLUENCE: how many bullish signals align?
+8. R/R ratio: minimum 1:2, prefer 1:3 on alts (higher TP for higher vol)
+
+### Position sizing (USD notional):
+Crypto max risk per trade = **1% of equity** (equity uses 2%, crypto half because of volatility)
+- Confidence 8-10: up to 1.0% portfolio risk
+- Confidence 6-7:  up to 0.7% portfolio risk
+- Confidence 4-5:  up to 0.5% portfolio risk
+- Confidence 1-3:  NO TRADE — watch only
+
+Recommended notional cap per trade (paper learning phase): $500.
+Position_size_pct field = % of total equity allocated to this position.
+
+## RISK RULES (ABSOLUTE)
+1. NEVER risk more than 1% of equity per trade
+2. NEVER concentrate >40% in a single asset group (L1, Meme, etc.)
+3. ALWAYS have a stop-loss plan — crypto's tail risk is real
+4. If BTC -10% in 24h: emergency mode, close all longs, no new entries
+5. Stablecoin pairs are NOT trading targets
+6. NEVER chase a coin already up 15%+ on the day without pullback
+7. Default stop: 4% (or 2x ATR, whichever is wider)
+
+## RESPONSE FORMAT
+Respond with ONLY this JSON. No markdown, no explanation outside JSON:
+{
+  "regime": "bull_strong | bull | neutral | bear | bear_strong",
+  "regime_reasoning": "2-3 sentences on current crypto regime (BTC trend, breadth, group rotation)",
+  "active_strategy": "momentum | selective_swing | defensive | mean_reversion",
+  "btc_dominance_note": "1 sentence: is BTC leading? alts catching up? meme rotation?",
+  "asset_group_view": "Brief: which groups are strongest/weakest right now",
+  "decisions": [
+    {
+      "ticker": "BTC/USD",
+      "action": "long | close_long | hold | watch | reduce",
+      "confidence": 8,
+      "strategy": "momentum",
+      "asset_group": "L1",
+      "reasoning": "Multi-step: (1) EMA9>21>50 strong uptrend, (2) RSI 64 healthy zone, (3) leading alt rotation, (4) BTC dominance rising. Entry on 4H pullback to EMA9.",
+      "entry_zone": "77800-78500",
+      "stop_loss": "75200",
+      "take_profit": "82000",
+      "risk_reward": "1:2.4",
+      "position_size_pct": 1.0,
+      "urgency": "medium",
+      "risk_note": "Watch CPI release tomorrow"
+    }
+  ],
+  "market_summary": "3-4 sentence overall crypto market analysis with regime context",
+  "portfolio_note": "2-3 sentences: portfolio health, asset group concentration, cash level",
+  "watchlist_alerts": [
+    {"ticker": "ETH/USD", "alert": "Approaching $2400 resistance — break with volume = next leg"}
+  ]
+}
+
+IMPORTANT:
+- Cover top 6-8 coins (don't waste tokens on neutral holds)
+- 'short' is NOT supported for spot crypto — only long, close_long, hold, watch, reduce
+- Confidence is 1-10 integer
+- Reasoning: 1-2 sentences, factor-driven
+- Price levels in actual USD (BTC: full price, alts: with appropriate decimals)
+- KEEP JSON COMPACT"""
+
+
+CRYPTO_REVIEW_SYSTEM_PROMPT = """You are reviewing your own past CRYPTO trading decisions as a self-improving AI trader.
+
+Analyze the pattern of decisions and extract specific, actionable lessons.
+
+Focus on crypto-specific factors:
+- Did you respect the higher volatility (2-3x equity)?
+- Did you over-concentrate in one asset group (L1, Meme, etc.)?
+- Did 24/7 markets cause you to over-trade?
+- Did news/sentiment moves catch you off-guard?
+- Were stops too tight for crypto's ATR?
+
+## RESPONSE FORMAT (JSON only, no markdown)
+{
+  "review": "1-2 sentence overall assessment",
+  "lessons": [
+    "Specific, actionable lesson 1",
+    "Specific, actionable lesson 2"
+  ],
+  "performance": {
+    "win_rate_pct": 0,
+    "avg_winner_pct": 0,
+    "avg_loser_pct": 0,
+    "biggest_mistake": "..."
+  },
+  "suggestions": [
+    "Concrete process improvement"
+  ]
+}"""
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -73,6 +234,9 @@ class CryptoBrain(BaseBrain):
         # (Railway env update → hot inject). __init__'te cache'lemiyoruz.
         self._cached_key = None
         self._cached_client = None
+        # Usage telemetri — son 200 çağrı (cache hit ratio + USD kestirim için)
+        self._usage_history: list[dict] = []
+        self._usage_history_max = 200
         # İlk değer __init__'te; sonra her api/health çağrısında refresh edilir
         self._refresh_api_key()
 
@@ -196,8 +360,8 @@ class CryptoBrain(BaseBrain):
         if sentiment:
             sentiment_text = self._format_sentiment(sentiment)
 
-        # Prompt build
-        prompt = self._build_master_prompt(
+        # User message — sadece dynamic data
+        user_message = self._build_user_message(
             cash=cash,
             equity=equity,
             positions_text=positions_text,
@@ -210,19 +374,28 @@ class CryptoBrain(BaseBrain):
             learning_context=learning_context or "",
         )
 
-        # Claude API
+        # Claude API — system kanalı cacheable (5dk ephemeral TTL).
+        # Static framework her çağrıda aynı → cache hit oranı yüksek →
+        # token maliyeti yaklaşık 1/10'a düşer.
         try:
             msg = self.client.messages.create(
                 model=self.model,
                 max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}],
+                system=[{
+                    "type": "text",
+                    "text": CRYPTO_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=[{"role": "user", "content": user_message}],
             )
             response_text = msg.content[0].text
             decisions = self._extract_json(response_text)
 
+            usage = self._record_usage(msg, kind="run_brain")
             decisions["timestamp"] = datetime.now(timezone.utc).isoformat()
             decisions["model"] = self.model
             decisions["asset_class"] = "crypto"
+            decisions["_usage"] = usage
             return decisions
 
         except Exception as e:
@@ -237,45 +410,20 @@ class CryptoBrain(BaseBrain):
             return {"review": "Analiz için yeterli veri yok", "lessons": []}
 
         trades_text = self._format_recent_trades(recent_trades)
-        prompt = f"""You are reviewing your own past CRYPTO trading decisions as a self-improving AI trader.
-
-## RECENT CRYPTO TRADES
-{trades_text}
-
-## YOUR JOB
-Analyze the pattern of decisions and extract specific, actionable lessons.
-
-Focus on crypto-specific factors:
-- Did you respect the higher volatility (2-3x equity)?
-- Did you over-concentrate in one asset group (L1, Meme, etc.)?
-- Did 24/7 markets cause you to over-trade?
-- Did news/sentiment moves catch you off-guard?
-- Were stops too tight for crypto's ATR?
-
-## RESPONSE FORMAT (JSON only, no markdown)
-{{
-  "review": "1-2 sentence overall assessment",
-  "lessons": [
-    "Specific, actionable lesson 1",
-    "Specific, actionable lesson 2"
-  ],
-  "performance": {{
-    "win_rate_pct": 0,
-    "avg_winner_pct": 0,
-    "avg_loser_pct": 0,
-    "biggest_mistake": "..."
-  }},
-  "suggestions": [
-    "Concrete process improvement"
-  ]
-}}"""
+        user_message = f"## RECENT CRYPTO TRADES\n{trades_text}"
 
         try:
             msg = self.client.messages.create(
                 model=self.model,
                 max_tokens=2000,
-                messages=[{"role": "user", "content": prompt}],
+                system=[{
+                    "type": "text",
+                    "text": CRYPTO_REVIEW_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=[{"role": "user", "content": user_message}],
             )
+            self._record_usage(msg, kind="review")
             return self._extract_json(msg.content[0].text)
         except Exception as e:
             return {"review": f"Hata: {e}", "lessons": []}
@@ -284,11 +432,15 @@ Focus on crypto-specific factors:
     # Prompt building (crypto-specific)
     # ───────────────────────────────────────────────────────────
 
-    def _build_master_prompt(
+    def _build_user_message(
         self, cash, equity, positions_text, market_text, ranking_text,
         trades_text, detected_regime, regime_reasoning,
         sentiment_text="", learning_context="",
     ) -> str:
+        """
+        Sadece dynamic data — system kanalındaki cacheable framework'ten
+        bağımsız. Static rules / format CRYPTO_SYSTEM_PROMPT'tedir.
+        """
         learning_section = (
             f"\n## LESSONS FROM PAST TRADES\n{learning_context}\n"
             if learning_context else ""
@@ -302,27 +454,15 @@ Focus on crypto-specific factors:
             if sentiment_text else ""
         )
 
-        return f"""You are the Chief Trading Officer of an autonomous AI crypto fund managing a USD-denominated paper portfolio.
-You are NOT an indicator interpreter. You are an executive decision-maker for the crypto market.
-
-Your job is to:
-1. FIRST identify the crypto regime (BTC-led bull / alt-season / meme-rally / chop / risk-off)
-2. SELECT the optimal strategy for the current regime
-3. ANALYZE each coin with multi-step reasoning (technicals + flow + group rotation)
-4. PROVIDE specific, actionable decisions with entry/exit levels and notional sizing
-5. EXPLAIN your reasoning like a fund manager justifying trades
-
-## CURRENT STATE
-Market Status: 24/7 OPEN (crypto never closes)
+        return f"""## CURRENT STATE
 Pre-detected Regime Signal: {detected_regime}{regime_block}
 Portfolio Cash: ${cash:,.2f}
 Total Equity: ${equity:,.2f}
-Asset Class: CRYPTO (USD-paired spot only, no perpetuals, no margin)
 
 ## OPEN POSITIONS
 {positions_text}
 
-## MARKET DATA (with technical indicators — Core 10)
+## MARKET DATA (Core 10 with technical indicators)
 {market_text}
 
 ## MOMENTUM RANKING
@@ -331,112 +471,7 @@ Asset Class: CRYPTO (USD-paired spot only, no perpetuals, no margin)
 ## RECENT TRADE HISTORY
 {trades_text}{learning_section}{sentiment_block}
 
-## CRYPTO-SPECIFIC CONTEXT (READ CAREFULLY)
-- Volatility is 2-3x equity. Default ATR%: BTC ~3%, alts often 4-6%.
-- BTC is the benchmark — alt-coins follow BTC dominance shifts.
-- 24/7 markets = no overnight gap, but flash dumps possible at any hour.
-- No PDT rule, fractional positions, instant settlement.
-- Asset groups (concentration limits apply):
-  L1: BTC, ETH, SOL, ADA, AVAX, DOT, XTZ, FIL
-  L2: ARB, POL
-  Payment: XRP, LTC, BCH
-  DeFi: UNI, AAVE, CRV, SUSHI, YFI, LDO, SKY
-  Infra: LINK, GRT, RENDER
-  Meme: DOGE, SHIB, PEPE, BONK, WIF, TRUMP, HYPE
-  RWA: PAXG, ONDO
-  Utility: BAT
-- Stablecoins (USDC, USDT, USDG) are EXCLUDED from trading universe.
-
-## STRATEGY FRAMEWORK
-
-### Regime → Strategy mapping:
-- **BULL_STRONG / BULL** (BTC uptrend, breadth >70%):
-  - MOMENTUM continuation: ride trending leaders
-  - Add to winners on BTC pullbacks (dollar-cost-into-strength)
-  - Target: alts with breakout volume + relative strength vs BTC
-  - Avoid: tops with RSI>75 + extreme funding
-
-- **NEUTRAL** (mixed signals, BTC chopping):
-  - SELECTIVE: only highest momentum_score (>70) with confluence
-  - Smaller positions (50% of normal size)
-  - Prefer BTC/ETH over alts (lower beta)
-  - Wait for clear breakout before adding
-
-- **BEAR / BEAR_STRONG** (BTC downtrend, breadth <40%):
-  - DEFENSIVE: close longs aggressively, raise cash
-  - Mean-reversion bounces ONLY at deep oversold (RSI<25 + BB lower)
-  - Stay 70%+ cash, no Meme group exposure
-  - Watch for capitulation volume spikes
-
-### Multi-Step Reasoning (REQUIRED for every decision):
-For each coin:
-1. TREND structure: EMA9 > EMA21 > EMA50 = strong; mixed = caution
-2. MOMENTUM: RSI 50-65 ideal; >75 overheating; <30 oversold
-3. RELATIVE strength vs BTC: outperforming or lagging?
-4. ASSET GROUP context: is the whole group moving together (rotation signal)?
-5. RISK level: ATR-based stop, last swing low, key support
-6. CATALYST: any narrative or news driving this?
-7. CONFLUENCE: how many bullish signals align?
-8. R/R ratio: minimum 1:2, prefer 1:3 on alts (higher TP for higher vol)
-
-### Position sizing (USD notional):
-Crypto max risk per trade = **1% of equity** (equity uses 2%, crypto half because of volatility)
-- Confidence 8-10: up to 1.0% portfolio risk
-- Confidence 6-7:  up to 0.7% portfolio risk
-- Confidence 4-5:  up to 0.5% portfolio risk
-- Confidence 1-3:  NO TRADE — watch only
-
-Recommended notional cap per trade (paper learning phase): $500.
-Position_size_pct field = % of total equity allocated to this position.
-
-## RISK RULES (ABSOLUTE)
-1. NEVER risk more than 1% of equity per trade
-2. NEVER concentrate >40% in a single asset group (L1, Meme, etc.)
-3. ALWAYS have a stop-loss plan — crypto's tail risk is real
-4. If BTC -10% in 24h: emergency mode, close all longs, no new entries
-5. Stablecoin pairs are NOT trading targets
-6. NEVER chase a coin already up 15%+ on the day without pullback
-7. Default stop: 4% (or 2× ATR, whichever is wider)
-
-## RESPONSE FORMAT
-Respond with ONLY this JSON. No markdown, no explanation outside JSON:
-{{
-  "regime": "bull_strong | bull | neutral | bear | bear_strong",
-  "regime_reasoning": "2-3 sentences on current crypto regime (BTC trend, breadth, group rotation)",
-  "active_strategy": "momentum | selective_swing | defensive | mean_reversion",
-  "btc_dominance_note": "1 sentence: is BTC leading? alts catching up? meme rotation?",
-  "asset_group_view": "Brief: which groups are strongest/weakest right now",
-  "decisions": [
-    {{
-      "ticker": "BTC/USD",
-      "action": "long | close_long | hold | watch | reduce",
-      "confidence": 8,
-      "strategy": "momentum",
-      "asset_group": "L1",
-      "reasoning": "Multi-step: (1) EMA9>21>50 strong uptrend, (2) RSI 64 healthy zone, (3) leading alt rotation, (4) BTC dominance rising. Entry on 4H pullback to EMA9.",
-      "entry_zone": "77800-78500",
-      "stop_loss": "75200",
-      "take_profit": "82000",
-      "risk_reward": "1:2.4",
-      "position_size_pct": 1.0,
-      "urgency": "medium",
-      "risk_note": "Watch CPI release tomorrow"
-    }}
-  ],
-  "market_summary": "3-4 sentence overall crypto market analysis with regime context",
-  "portfolio_note": "2-3 sentences: portfolio health, asset group concentration, cash level",
-  "watchlist_alerts": [
-    {{"ticker": "ETH/USD", "alert": "Approaching $2400 resistance — break with volume = next leg"}}
-  ]
-}}
-
-IMPORTANT:
-- Cover top 6-8 coins (don't waste tokens on neutral holds)
-- 'short' is NOT supported for spot crypto — only long, close_long, hold, watch, reduce
-- Confidence is 1-10 integer
-- Reasoning: 1-2 sentences, factor-driven
-- Price levels in actual USD (BTC: full price, alts: with appropriate decimals)
-- KEEP JSON COMPACT"""
+Now produce the decision JSON exactly per the response format in the system instructions."""
 
     # ───────────────────────────────────────────────────────────
     # Formatting helpers (crypto-specific)
@@ -544,6 +579,112 @@ IMPORTANT:
                 except Exception:
                     pass
             return {"error": "JSON parse failed", "raw": text[:500]}
+
+    # ───────────────────────────────────────────────────────────
+    # Usage tracking (prompt caching telemetri)
+    # ───────────────────────────────────────────────────────────
+
+    # USD per-million-token fiyat tablosu (Anthropic 2026 publik fiyatları;
+    # bu table'i config'ten geçirmek isteyene açık — şimdilik sabit).
+    _PRICING_USD_PER_MTOK = {
+        # model_substring → (input, cache_write, cache_read, output)
+        "sonnet": (3.0, 3.75, 0.30, 15.0),
+        "haiku":  (1.0, 1.25, 0.10, 5.0),
+        "opus":   (15.0, 18.75, 1.50, 75.0),
+    }
+
+    def _model_pricing(self) -> tuple:
+        m = (self.model or "").lower()
+        for key, price in self._PRICING_USD_PER_MTOK.items():
+            if key in m:
+                return price
+        return self._PRICING_USD_PER_MTOK["sonnet"]
+
+    def _record_usage(self, msg, kind: str = "run_brain") -> dict:
+        """
+        Anthropic response'undan usage çek, history'ye ekle, USD kestirimi
+        hesapla. Returns: dict (response içine de gömülür).
+        """
+        u = getattr(msg, "usage", None)
+        if not u:
+            return {}
+        in_tok = getattr(u, "input_tokens", 0) or 0
+        out_tok = getattr(u, "output_tokens", 0) or 0
+        cache_write = getattr(u, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
+
+        p_in, p_cw, p_cr, p_out = self._model_pricing()
+        cost_usd = (
+            in_tok      * p_in  / 1_000_000
+            + cache_write * p_cw  / 1_000_000
+            + cache_read  * p_cr  / 1_000_000
+            + out_tok    * p_out / 1_000_000
+        )
+
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": kind,
+            "model": self.model,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "cache_creation_input_tokens": cache_write,
+            "cache_read_input_tokens": cache_read,
+            "cost_usd": round(cost_usd, 6),
+        }
+        self._usage_history.append(entry)
+        # Bellek koruması — eski entry'leri at
+        if len(self._usage_history) > self._usage_history_max:
+            self._usage_history = self._usage_history[-self._usage_history_max:]
+        return entry
+
+    def get_usage_stats(self) -> dict:
+        """
+        Aggregate stats — `/api/crypto/brain-usage` endpoint için.
+        Cache hit ratio, total tokens, total cost, projected monthly.
+        """
+        h = self._usage_history
+        if not h:
+            return {
+                "calls": 0,
+                "model": self.model,
+                "enabled": self.enabled,
+                "cache_hit_ratio": 0.0,
+                "total_input_tokens": 0,
+                "total_cache_read": 0,
+                "total_cache_write": 0,
+                "total_output_tokens": 0,
+                "total_cost_usd": 0.0,
+                "avg_cost_per_call_usd": 0.0,
+                "projected_monthly_usd": 0.0,
+                "history_window": self._usage_history_max,
+                "recent": [],
+            }
+        in_tot = sum(e["input_tokens"] for e in h)
+        cr_tot = sum(e["cache_read_input_tokens"] for e in h)
+        cw_tot = sum(e["cache_creation_input_tokens"] for e in h)
+        out_tot = sum(e["output_tokens"] for e in h)
+        cost_tot = sum(e["cost_usd"] for e in h)
+        # Cacheable input = cache_read + cache_write + plain input (yaklaşık)
+        cacheable = cr_tot + cw_tot + in_tot
+        hit_ratio = cr_tot / cacheable if cacheable else 0.0
+        avg_cost = cost_tot / len(h) if h else 0
+        # Projeksiyon: 5dk'da bir tarama varsayımı → 12/saat × 24 × 30 = 8640
+        projected_monthly = avg_cost * 8640
+        return {
+            "calls": len(h),
+            "model": self.model,
+            "enabled": self.enabled,
+            "cache_hit_ratio": round(hit_ratio, 3),
+            "total_input_tokens": in_tot,
+            "total_cache_read": cr_tot,
+            "total_cache_write": cw_tot,
+            "total_output_tokens": out_tot,
+            "total_cost_usd": round(cost_tot, 4),
+            "avg_cost_per_call_usd": round(avg_cost, 6),
+            "projected_monthly_usd": round(projected_monthly, 2),
+            "history_window": self._usage_history_max,
+            "recent": h[-10:],
+        }
 
     @staticmethod
     def _empty(reason: str) -> dict:
